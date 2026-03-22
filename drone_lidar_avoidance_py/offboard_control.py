@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
+from geometry_msgs.msg import Point
+from std_msgs.msg import Bool
+
+from px4_msgs.msg import OffboardControlMode
+from px4_msgs.msg import TrajectorySetpoint
+from px4_msgs.msg import VehicleCommand
+from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleStatus
+
+
+class OffboardControlNode(Node):
+    def __init__(self) -> None:
+        super().__init__('offboard_control_node')
+
+        # -------------------------------------------------
+        # Declare parameters
+        # -------------------------------------------------
+        self.declare_parameter('default_target_x', 0.0)
+        self.declare_parameter('default_target_y', 0.0)
+        self.declare_parameter('default_target_z', -5.0)
+        self.declare_parameter('target_yaw', 0.0)
+        self.declare_parameter('setpoint_rate_hz', 10.0)
+
+        # -------------------------------------------------
+        # Read parameters
+        # -------------------------------------------------
+        self.default_target_x = float(
+            self.get_parameter('default_target_x').value
+        )
+        self.default_target_y = float(
+            self.get_parameter('default_target_y').value
+        )
+        self.default_target_z = float(
+            self.get_parameter('default_target_z').value
+        )
+        self.target_yaw = float(
+            self.get_parameter('target_yaw').value
+        )
+        self.setpoint_rate_hz = float(
+            self.get_parameter('setpoint_rate_hz').value
+        )
+
+        if self.setpoint_rate_hz <= 0.0:
+            raise ValueError('Parameter "setpoint_rate_hz" must be > 0.0')
+
+        self.timer_period = 1.0 / self.setpoint_rate_hz
+
+        # PX4 bridge QoS
+        px4_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        # Regular ROS2 QoS for mission-side topics
+        ros_qos = 10
+
+        # -------------------------------------------------
+        # PX4 publishers
+        # -------------------------------------------------
+        self.offboard_control_mode_pub = self.create_publisher(
+            OffboardControlMode,
+            '/fmu/in/offboard_control_mode',
+            px4_qos
+        )
+        self.trajectory_setpoint_pub = self.create_publisher(
+            TrajectorySetpoint,
+            '/fmu/in/trajectory_setpoint',
+            px4_qos
+        )
+        self.vehicle_command_pub = self.create_publisher(
+            VehicleCommand,
+            '/fmu/in/vehicle_command',
+            px4_qos
+        )
+
+        # -------------------------------------------------
+        # PX4 subscribers
+        # -------------------------------------------------
+        self.vehicle_local_position_sub = self.create_subscription(
+            VehicleLocalPosition,
+            '/fmu/out/vehicle_local_position',
+            self.vehicle_local_position_callback,
+            px4_qos
+        )
+        self.vehicle_status_sub = self.create_subscription(
+            VehicleStatus,
+            '/fmu/out/vehicle_status_v1',
+            self.vehicle_status_callback,
+            px4_qos
+        )
+
+        # -------------------------------------------------
+        # Mission interface
+        # -------------------------------------------------
+        self.target_position_sub = self.create_subscription(
+            Point,
+            '/mission/target_position',
+            self.target_position_callback,
+            ros_qos
+        )
+
+        self.land_request_sub = self.create_subscription(
+            Bool,
+            '/mission/land',
+            self.land_request_callback,
+            ros_qos
+        )
+
+        self.current_position_pub = self.create_publisher(
+            Point,
+            '/mission/current_position',
+            ros_qos
+        )
+
+        # -------------------------------------------------
+        # Internal state
+        # -------------------------------------------------
+        self.vehicle_local_position = VehicleLocalPosition()
+        self.vehicle_status = VehicleStatus()
+
+        self.have_local_position = False
+        self.have_target_position = False
+        self.land_requested = False
+
+        # Startup default target from parameters
+        self.target_x = self.default_target_x
+        self.target_y = self.default_target_y
+        self.target_z = self.default_target_z
+
+        self.last_logged_target = (None, None, None)
+
+        self.offboard_setpoint_counter = 0
+        self.timer = self.create_timer(self.timer_period, self.timer_callback)
+
+        # -------------------------------------------------
+        # Startup logs
+        # -------------------------------------------------
+        self.get_logger().info('Offboard control node started')
+        self.get_logger().info(
+            f'Parameters: default_target=({self.default_target_x:.2f}, '
+            f'{self.default_target_y:.2f}, {self.default_target_z:.2f}), '
+            f'target_yaw={self.target_yaw:.2f}, '
+            f'setpoint_rate_hz={self.setpoint_rate_hz:.2f}'
+        )
+        self.get_logger().info(
+            f'Default target position set to '
+            f'({self.target_x:.2f}, {self.target_y:.2f}, {self.target_z:.2f}) in NED'
+        )
+
+    # ------------------------------------------------------------------
+    # PX4 callbacks
+    # ------------------------------------------------------------------
+    def vehicle_local_position_callback(self, msg: VehicleLocalPosition) -> None:
+        self.vehicle_local_position = msg
+        self.have_local_position = True
+
+        current_position_msg = Point()
+        current_position_msg.x = float(msg.x)
+        current_position_msg.y = float(msg.y)
+        current_position_msg.z = float(msg.z)
+        self.current_position_pub.publish(current_position_msg)
+
+    def vehicle_status_callback(self, msg: VehicleStatus) -> None:
+        self.vehicle_status = msg
+
+    # ------------------------------------------------------------------
+    # Mission-side callbacks
+    # ------------------------------------------------------------------
+    def target_position_callback(self, msg: Point) -> None:
+        self.target_x = float(msg.x)
+        self.target_y = float(msg.y)
+        self.target_z = float(msg.z)
+        self.have_target_position = True
+
+        rounded_target = (
+            round(self.target_x, 2),
+            round(self.target_y, 2),
+            round(self.target_z, 2)
+        )
+
+        if rounded_target != self.last_logged_target:
+            self.get_logger().info(
+                f'Updated target position: '
+                f'x={self.target_x:.2f}, y={self.target_y:.2f}, z={self.target_z:.2f}'
+            )
+            self.last_logged_target = rounded_target
+
+    def land_request_callback(self, msg: Bool) -> None:
+        if msg.data and not self.land_requested:
+            self.land_requested = True
+            self.get_logger().info('Landing requested by mission planner')
+
+    # ------------------------------------------------------------------
+    # Main timer loop
+    # ------------------------------------------------------------------
+    def timer_callback(self) -> None:
+        # Always maintain offboard heartbeat while active
+        self.publish_offboard_control_mode()
+
+        # Before landing is requested, keep publishing the latest position target
+        if not self.land_requested:
+            self.publish_trajectory_setpoint()
+
+        # Send a few setpoints before requesting OFFBOARD and ARM
+        if self.offboard_setpoint_counter == 10:
+            self.get_logger().info('Requesting OFFBOARD mode...')
+            self.publish_vehicle_command(
+                VehicleCommand.VEHICLE_CMD_DO_SET_MODE,
+                param1=1.0,
+                param2=6.0
+            )
+
+            self.get_logger().info('Requesting ARM...')
+            self.arm()
+
+        # Once landing is requested, issue land command once after system is already running
+        if self.land_requested and self.offboard_setpoint_counter >= 11:
+            self.get_logger().info('Sending LAND command to PX4...')
+            self.land()
+            self.land_requested = False
+
+        if self.offboard_setpoint_counter < 11:
+            self.offboard_setpoint_counter += 1
+
+    # ------------------------------------------------------------------
+    # PX4 publish helpers
+    # ------------------------------------------------------------------
+    def publish_offboard_control_mode(self) -> None:
+        msg = OffboardControlMode()
+        msg.position = True
+        msg.velocity = False
+        msg.acceleration = False
+        msg.attitude = False
+        msg.body_rate = False
+        msg.timestamp = self.get_timestamp_us()
+        self.offboard_control_mode_pub.publish(msg)
+
+    def publish_trajectory_setpoint(self) -> None:
+        msg = TrajectorySetpoint()
+        msg.position = [self.target_x, self.target_y, self.target_z]
+        msg.yaw = self.target_yaw
+        msg.timestamp = self.get_timestamp_us()
+        self.trajectory_setpoint_pub.publish(msg)
+
+    def publish_vehicle_command(
+        self,
+        command: int,
+        param1: float = 0.0,
+        param2: float = 0.0
+    ) -> None:
+        msg = VehicleCommand()
+        msg.command = command
+        msg.param1 = param1
+        msg.param2 = param2
+        msg.target_system = 1
+        msg.target_component = 1
+        msg.source_system = 1
+        msg.source_component = 1
+        msg.from_external = True
+        msg.timestamp = self.get_timestamp_us()
+        self.vehicle_command_pub.publish(msg)
+
+    # ------------------------------------------------------------------
+    # High-level vehicle commands
+    # ------------------------------------------------------------------
+    def arm(self) -> None:
+        self.publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+            param1=1.0
+        )
+
+    def disarm(self) -> None:
+        self.publish_vehicle_command(
+            VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM,
+            param1=0.0
+        )
+
+    def land(self) -> None:
+        self.publish_vehicle_command(VehicleCommand.VEHICLE_CMD_NAV_LAND)
+
+    # ------------------------------------------------------------------
+    # Utilities
+    # ------------------------------------------------------------------
+    def get_timestamp_us(self) -> int:
+        return int(self.get_clock().now().nanoseconds / 1000)
+
+
+def main(args=None) -> None:
+    rclpy.init(args=args)
+    node = OffboardControlNode()
+
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        node.get_logger().info('Shutting down offboard node')
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
