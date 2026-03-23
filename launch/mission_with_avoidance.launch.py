@@ -28,7 +28,7 @@ def generate_launch_description():
 
     obstacle_distance_threshold_arg = DeclareLaunchArgument(
         'obstacle_distance_threshold',
-        default_value='1.5',
+        default_value='4.0',
         description='Front obstacle detection threshold in meters'
     )
 
@@ -94,7 +94,7 @@ def generate_launch_description():
         output='screen',
         parameters=[{
             'obstacle_distance_threshold': LaunchConfiguration('obstacle_distance_threshold'),
-            'log_rate_hz': 1.0,
+            'log_rate_hz': 20.0,
         }]
     )
 
@@ -104,9 +104,9 @@ def generate_launch_description():
         name='avoidance_manager_node',
         output='screen',
         parameters=[{
-            'avoidance_offset': 2.0,
+            'avoidance_offset': 4.0,
             'goal_tolerance': 0.5,
-            'timer_rate_hz': 10.0,
+            'timer_rate_hz': 20.0,
         }]
     )
 

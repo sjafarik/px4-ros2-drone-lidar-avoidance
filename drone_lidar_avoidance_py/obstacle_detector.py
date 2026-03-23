@@ -15,8 +15,8 @@ class ObstacleDetectorNode(Node):
         # -------------------------------------------------
         # Parameters
         # -------------------------------------------------
-        self.declare_parameter('obstacle_distance_threshold', 2.0)
-        self.declare_parameter('log_rate_hz', 1.0)
+        self.declare_parameter('obstacle_distance_threshold', 3.0)
+        self.declare_parameter('log_rate_hz', 20.0)
 
         self.threshold = float(
             self.get_parameter('obstacle_distance_threshold').value
