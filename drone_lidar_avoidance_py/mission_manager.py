@@ -7,7 +7,7 @@ import rclpy
 from rclpy.node import Node
 
 from geometry_msgs.msg import Point
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 
 class MissionState(Enum):
@@ -18,7 +18,7 @@ class MissionState(Enum):
     DONE = 4
 
 
-class MissionPlannerNode(Node):
+class MissionManagerNode(Node):
     def __init__(self) -> None:
         super().__init__('mission_manager_node')
 
@@ -60,6 +60,12 @@ class MissionPlannerNode(Node):
         self.land_pub = self.create_publisher(
             Bool,
             '/mission/land',
+            10
+        )
+
+        self.target_yaw_pub = self.create_publisher(
+            Float32,
+            '/mission/desired_yaw',
             10
         )
 
@@ -176,6 +182,7 @@ class MissionPlannerNode(Node):
         takeoff_target.z = self.takeoff_altitude
 
         self.publish_target_position(takeoff_target)
+        self.publish_target_yaw(self.compute_yaw_to_target(takeoff_target))        
 
         if self.is_goal_reached(takeoff_target):
             self.goal_hold_counter += 1
@@ -194,6 +201,7 @@ class MissionPlannerNode(Node):
 
         current_goal = self.waypoints[self.current_waypoint_index]
         self.publish_target_position(current_goal)
+        self.publish_target_yaw(self.compute_yaw_to_target(current_goal))        
 
         distance = self.distance_to_goal(current_goal)
 
@@ -244,6 +252,20 @@ class MissionPlannerNode(Node):
     def publish_target_position(self, target: Point) -> None:
         self.target_position_pub.publish(target)
 
+    def publish_target_yaw(self, yaw: float) -> None:
+        msg = Float32()
+        msg.data = float(yaw)
+        self.target_yaw_pub.publish(msg)
+    
+    def compute_yaw_to_target(self, target: Point) -> float:
+        dx = target.x - self.current_position.x
+        dy = target.y - self.current_position.y
+
+        if abs(dx) < 1e-6 and abs(dy) < 1e-6:
+            return 0.0
+
+        return math.atan2(dy, dx)
+
     def distance_to_goal(self, goal: Point) -> float:
         dx = goal.x - self.current_position.x
         dy = goal.y - self.current_position.y
@@ -266,7 +288,7 @@ class MissionPlannerNode(Node):
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = MissionPlannerNode()
+    node = MissionManagerNode()
 
     try:
         rclpy.spin(node)

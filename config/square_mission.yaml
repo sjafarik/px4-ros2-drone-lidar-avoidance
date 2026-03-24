@@ -1,6 +1,0 @@
-mission_planner_node:
-  ros__parameters:
-    takeoff_altitude: -5.0
-    position_tolerance: 0.5
-    hold_count_required: 10
-    waypoints: [0.0, 0.0, -5.0, 5.0, 0.0, -5.0, 5.0, 5.0, -5.0, 0.0, 5.0, -5.0]

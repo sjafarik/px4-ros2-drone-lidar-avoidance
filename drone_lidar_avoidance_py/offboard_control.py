@@ -5,7 +5,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
 from geometry_msgs.msg import Point
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Float32
 
 from px4_msgs.msg import OffboardControlMode
 from px4_msgs.msg import TrajectorySetpoint
@@ -97,6 +97,12 @@ class OffboardControlNode(Node):
             px4_qos
         )
 
+        self.target_yaw_sub = self.create_subscription(
+            Float32,
+            '/mission/target_yaw',
+            self.target_yaw_callback,
+            ros_qos
+        )
         # -------------------------------------------------
         # Mission interface
         # -------------------------------------------------
@@ -140,6 +146,8 @@ class OffboardControlNode(Node):
         self.offboard_setpoint_counter = 0
         self.timer = self.create_timer(self.timer_period, self.timer_callback)
 
+        self.target_yaw_cmd = self.target_yaw
+        self.have_target_yaw = False
         # -------------------------------------------------
         # Startup logs
         # -------------------------------------------------
@@ -192,6 +200,10 @@ class OffboardControlNode(Node):
                 f'x={self.target_x:.2f}, y={self.target_y:.2f}, z={self.target_z:.2f}'
             )
             self.last_logged_target = rounded_target
+
+    def target_yaw_callback(self, msg: Float32) -> None:
+        self.target_yaw_cmd = float(msg.data)
+        self.have_target_yaw = True
 
     def land_request_callback(self, msg: Bool) -> None:
         if msg.data and not self.land_requested:
@@ -246,7 +258,7 @@ class OffboardControlNode(Node):
     def publish_trajectory_setpoint(self) -> None:
         msg = TrajectorySetpoint()
         msg.position = [self.target_x, self.target_y, self.target_z]
-        msg.yaw = self.target_yaw
+        msg.yaw = self.target_yaw_cmd
         msg.timestamp = self.get_timestamp_us()
         self.trajectory_setpoint_pub.publish(msg)
 
